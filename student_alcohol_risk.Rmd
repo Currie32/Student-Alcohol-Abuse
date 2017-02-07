@@ -1,0 +1,1579 @@
+---
+title: "Analyzing Alcohol Abuse Among Students"
+author: "David Currie"
+date: "January 22, 2017"
+output: html_document
+---
+
+The goal for this analysis is to create a model that can predict which students are consuming dangerous amounts of alcohol. We will first perform an analysis on all of the features, then use this information to build our model. Hopefully we will be able to create some useful features and find some strong relationships to build our predictive model.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, packages, fig.width=9, fig.height=6}
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE, fig.width=9, fig.height=6)
+
+library(plotly)
+library(plyr)
+library(dplyr)
+library(caret)
+library(randomForest)
+library(xgboost)
+library(e1071)
+```
+
+```{r}
+df <- read.csv("/Users/Dave/Desktop/Programming/Personal Projects/student_alcohol_Kaggle/student-por.csv")
+```
+
+```{r Helper Functions}
+
+featureSummary <- function(feature){
+  plot_ly(df, x = feature, color = ~Risk, type = "histogram")
+}
+
+boxScatter <- function(feature){
+  ggplotly(ggplot(aes(Risk, feature), data = df) +
+  geom_violin(alpha = 0.3, color = I("Red"), fill = I("Red")) +
+  geom_boxplot(alpha = 0.5, color = I("black")) +
+  geom_point(position = position_jitter(width = 0.5, height = 0.1), 
+             color = I("blue"),
+             alpha = 0.4))
+}
+
+ns <- list(title = "Number of Students")
+m <- list(pad = 5,
+          t = 80,
+          b = 80)
+risk <- list(title = "Risk")
+```
+
+
+```{r}
+str(df)
+```
+
+It's a rather small dataset that we are working with, and I'm worried that the data is not optimally reflective of the average student. We are only looking at students who have taken a Portugese class, an elective course, for which there might be a 'type' of student that takes this class. I expect that we would have a more accurate sense of the average student if we had data from a mandatory class, such as math or English. Nonetheless, I hope we will have some interesting and useful findings.
+
+```{r}
+len_df <- dim(df)[1]
+```
+
+```{r}
+names(df)[27] <- "Weekday"
+names(df)[28] <- "Weekend"
+df$Total <- df$Weekend + df$Weekday
+```
+
+# Univariate Analysis
+
+```{r}
+plot_ly(df, x = ~Weekday, type = "histogram", 
+        marker = list(line = list(color = 'white', width = 1))) %>%
+  layout(title = "Alcohol Consumption during the Week",
+         yaxis = ns,
+         xaxis = list(title = "Amount of Alcohol"),
+         margin = m)
+
+print("Percent of students in each group:")
+table(df$Weekday) / len_df
+```
+
+The majority of the students consume very little, if any, alcohol during the week, but about 5% of students drink significant amounts (values >= 4).
+
+```{r}
+plot_ly(df, x = ~Weekend, type = "histogram", 
+        marker = list(line = list(color = 'white', width = 1))) %>%
+  layout(title = "Alcohol Consumption on Weekends",
+         yaxis = ns,
+         xaxis = list(title = "Amount of Alcohol"),
+         margin = m)
+
+print("Percent of students in each group:")
+table(df$Weekend) / len_df
+```
+
+Clearly students are drinking much more alcohol on weekends compared to weekdays. The percent of signifiant drinkers jumped from about 5% to just over 20%. Those drinking little to no alcohol (value = 1) was reduced by nearly half.
+
+```{r}
+alcohol <- data.frame(table(df$Weekday, df$Weekend))
+names(alcohol)[1] <- "Weekday"
+names(alcohol)[2] <- "Weekend"
+names(alcohol)[3] <- "Students"
+```
+
+```{r}
+plot_ly(alcohol, x=~Weekday, y=~Weekend, z=~Students, type = "heatmap",
+      hoverinfo = "text",
+      text = ~paste("Weekday:", Weekday,
+                    "</br>Weekend:", Weekend,
+                    "</br>Students:", Students)) %>%
+  layout(title = "Alcohol Consumption on Weekdays vs Weekends",
+         margin = m)
+
+print("Correlation between weekday and weekend:")
+cor(df$Weekday, df$Weekend)
+```
+
+Of the 649 students, 241 (or 37.1%) of them drink little to no alcohol. 210 of the 451 (46.6%) students who do not drink during the week, consume some alcohol on the weekends. It is very rarely the case that students drink more during the week than on weekends.
+
+```{r}
+plot_ly(df, x = ~Total, type = "histogram", 
+        marker = list(line = list(color = 'white', width = 1))) %>%
+  layout(title = "Total Alcohol Consumption (Weekday + Weekend)",
+         xaxis = list(title = "Amount of Alcohol"),
+         yaxis = ns,
+         margin = m)
+
+print("Percent of students in each group:")
+table(df$Total) / len_df
+```
+
+For the remainder of this analysis, we are going to be dividing the students into one of three groups. 'Low Risk' for students with total alcohol consumption values <= 3, 'Medium Risk' for values <= 7, and 'High Risk' for values > 7 or having either the 'Weekday' or 'Weekend' value equal to 5. 
+
+```{r}
+df$Risk <- "Low"
+df$Risk[df$Total > 3] <- "Medium"
+df$Risk[df$Total > 7 | df$Weekend == 5 | df$Weekday == 5] <- "High"
+
+df$Risk <- factor(df$Risk, levels = c("Low","Medium","High"))
+```
+
+```{r}
+plot_ly(df, x = ~Risk, type = "histogram", 
+        marker = list(line = list(color = 'white', width = 1))) %>%
+  layout(title = "Risk Groups for Alcohol Abuse",
+         yaxis = ns,
+         margin = m)
+
+print("Percent of students in each risk group:")
+table(df$Risk) / len_df
+```
+
+Although it is good that the majority of the students are in the low risk group, it will be very important to build a model that can accurately predict which students are in the high risk group, so that they can receive the guidance they need to stop this detrimental behaviour.
+
+# Bivariate Analysis
+
+```{r}
+df$school <- factor(df$school, levels = c("GP","MS"), 
+                    labels = c("Gabriel Pereira", "Mousinho da Silveira"))
+```
+
+
+```{r}
+p1 <- plot_ly(df, x=~Risk, color = ~school, type = "histogram") %>%
+    layout(barmode = "stack",
+           xaxis = risk)
+
+a <- data.frame(prop.table(table(df$Risk, df$school),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             showlegend = FALSE) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "School vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students attending each school")
+table(df$school)
+table(df$school)/len_df
+```
+
+Althought there are more students attending Gabriel Pereira, the relative number of students in each risk group is about the same.
+
+```{r}
+df$sex <- factor(df$sex, levels = c("F","M"), 
+                    labels = c("Female", "Male"))
+```
+
+
+```{r}
+p1 <- plot_ly(df, x=~Risk, color = ~sex, type = "histogram") %>%
+    layout(barmode = "stack",
+           xaxis = risk)
+
+a <- data.frame(prop.table(table(df$Risk, df$sex),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             showlegend = FALSE) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Sex vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students of each gender:")
+table(df$sex)
+table(df$sex)/len_df
+```
+
+Despite 59% of the students being female, 81% of those in the high risk group are males. 
+
+```{r}
+p1 <- plot_ly(df, x=~age, color = ~Risk, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = list(title = "Age"),
+           margin = m)
+
+a <- data.frame(prop.table(table(df$Risk, df$age),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1))) %>%
+  layout(barmode = "stack",
+         xaxis = risk,
+         margin = m)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Age vs Risk")
+
+print("Number of students for each age:")
+table(df$age)
+table(df$age) / len_df
+
+print("Correlation between age and risk")
+cor(df$age, as.numeric(df$Risk))
+```
+
+```{r}
+df$ageGroup <- 0
+df$ageGroup[df$age >= 17] <- 1
+df$ageGroup[df$age >= 19] <- 2
+```
+
+
+Although there are fewer older students to make this conclusion with, it seems that as students age, they drink more.
+
+```{r}
+df$address <- factor(df$address, levels = c("R","U"), 
+                    labels = c("Rural", "Urban"))
+```
+
+
+```{r}
+p1 <- plot_ly(df, x=~Risk, color = ~address, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = risk)
+
+a <- data.frame(prop.table(table(df$Risk, df$address),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1)),
+             showlegend = FALSE) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Address vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students of each type of address:")
+table(df$address)
+table(df$address)/len_df
+```
+
+Many more students live in urban areas, but this does not tell us anything about the risk of alcohol abuse.
+
+```{r}
+df$famsize <- factor(df$famsize, levels = c("GT3","LE3"), 
+                    labels = c("Greater than 3", "Less than 3"))
+```
+
+
+```{r}
+p1 <- plot_ly(df, x=~Risk, color = ~famsize, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = risk)
+
+a <- data.frame(prop.table(table(df$Risk, df$famsize),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1)),
+             showlegend = FALSE) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Family Size vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students of each family size:")
+table(df$famsize)
+table(df$famsize)/len_df
+```
+
+Students from smaller families are more likely to be at risk of alcohol abuse.
+
+```{r}
+df$Pstatus <- factor(df$Pstatus, levels = c("A","T"), 
+                    labels = c("Apart", "Together"))
+```
+
+
+```{r}
+p1 <- plot_ly(df, x=~Risk, color = ~Pstatus, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = risk)
+
+a <- data.frame(prop.table(table(df$Risk, df$Pstatus),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1)),
+             showlegend = FALSE) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Parent's Marriage Status vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students of each parental marriage status group:")
+table(df$Pstatus)
+table(df$Pstatus)/len_df
+```
+
+I am a bit surprised to see that students in the higher risk groups are more likely to have parents living together.
+
+```{r}
+df$Medu <- factor(df$Medu, levels = c("0","1","2","3","4"), 
+                    labels = c("None", "4th Grade","5th to 9th Grade",
+                               "Secondary Education","Higher Education"))
+```
+
+
+```{r}
+p1 <- plot_ly(df, x=~Medu, color = ~Risk, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = list(title = "Mother's Education Level"))
+
+a <- data.frame(prop.table(table(df$Risk, df$Medu),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1))) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Mother's Education Level vs Risk",
+         yaxis = ns,
+         margin = list(pad = 5,
+                       t = 80,
+                       b = 150))
+
+print("Number of students for each level of education (Mother):")
+table(df$Medu)
+table(df$Medu)/len_df
+```
+
+There doesn't appear to be any relationship between a mother's education level and their child's drinking habits.
+
+```{r}
+df$Fedu <- factor(df$Fedu, levels = c("0","1","2","3","4"), 
+                    labels = c("None", "4th Grade","5th to 9th Grade",
+                               "Secondary Education","Higher Education"))
+```
+
+
+```{r}
+p1 <- plot_ly(df, x=~Fedu, color = ~Risk, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = list(title = "Father's Education Level"))
+
+a <- data.frame(prop.table(table(df$Risk, df$Fedu),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1))) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Father's Education Level vs Risk",
+         yaxis = ns,
+         margin = list(pad = 5,
+                       t = 80,
+                       b = 150))
+
+print("Number of students for each level of education (Father):")
+table(df$Fedu)
+table(df$Fedu)/len_df
+```
+
+Much like with the mother's education level, there doesn't appear to be any relationship between a father's education level and their child's drinking habits.
+
+```{r}
+print("Correlation between mothers' and fathers' education levels:")
+cor(as.numeric(df$Medu), as.numeric(df$Fedu))
+```
+
+There is a reasonably strong correlation between a mother's and a father's education level. This helps to explain the similarities in the plots we just saw.
+
+```{r}
+df$Mjob <- factor(df$Mjob, levels = c("at_home","health","other","services","teacher"), 
+                    labels = c("At_Home", "Health","Other","Services","Teacher"))
+```
+
+
+```{r}
+p1 <- plot_ly(df, x=~Mjob, color = ~Risk, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = list(title = "Mother's Job Type"))
+
+a <- data.frame(prop.table(table(df$Risk, df$Mjob),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1))) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Mother's Job Type vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students for each type of job (Mother):")
+table(df$Mjob)
+table(df$Mjob)/len_df
+```
+
+Although 'At_Home' and 'Teacher' have a larger share of the high risk students, it's a small increase. Remember, there are only 52 students in the high risk group, so a change of nearly 2% can be attributed to just one student.
+
+```{r}
+df$Fjob <- factor(df$Fjob, levels = c("at_home","health","other","services","teacher"), 
+                    labels = c("At_Home", "Health","Other","Services","Teacher"))
+```
+
+
+```{r}
+p1 <- plot_ly(df, x=~Fjob, color = ~Risk, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = list(title = "Father's Job Type"))
+
+a <- data.frame(prop.table(table(df$Risk, df$Fjob),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1))) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Father's Job Type vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students for each type of job (Father):")
+table(df$Fjob)
+table(df$Fjob)/len_df
+```
+
+This looks more significant. If a father works in services, it seems that their child is more likely to abuse alcohol.
+
+```{r}
+df$reason <- factor(df$reason, levels = c("course","home","other","reputation"), 
+                    labels = c("Course Perference", "Close to Home","Other","School Reputation"))
+```
+
+
+```{r}
+p1 <- plot_ly(df, x=~reason, color = ~Risk, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = list(title = "Type of Reason"))
+
+a <- data.frame(prop.table(table(df$Risk, df$reason),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1))) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Reason for Choosing School vs Risk",
+         yaxis = ns,
+         margin = list(pad = 5,
+                       t = 80,
+                       b = 120))
+
+print("Number of students for each type of reason:")
+table(df$reason)
+table(df$reason)/len_df
+```
+
+If the school was chosen based on its reputation, the student appears less likely to abuse alcohol.
+
+```{r}
+df$guardian <- factor(df$guardian, levels = c("father","mother","other"), 
+                    labels = c("Father", "Mother","Other"))
+```
+
+
+```{r}
+p1 <- plot_ly(df, x=~guardian, color = ~Risk, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = list(title = "Type of Guardian"))
+
+a <- data.frame(prop.table(table(df$Risk, df$guardian),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1))) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Guardian vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students for each type of guardian:")
+table(df$guardian)
+table(df$guardian)/len_df
+```
+
+```{r}
+df$guardianOther <- 0
+df$guardianOther[df$guardian == "Other"] <- 1
+```
+
+
+It is interesting to see that so many students chose their mother as their primary guardian, yet so few students having separated parents. Despite the ratios being similar for each risk group, if the guardian is 'Other,' the student is more likely to be in a higher risk group.
+
+```{r}
+df$traveltime <- factor(df$traveltime, levels = c("1","2","3","4"), 
+                    labels = c("Less than 15", "15 to 30","30 to 60","More than 60"))
+```
+
+
+```{r}
+p1 <- plot_ly(df, x=~traveltime, color = ~Risk, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = list(title = "Travel Time to School (Minutes)"))
+
+a <- data.frame(prop.table(table(df$Risk, df$traveltime),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1))) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Travel Time to School vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students for each travel time group:")
+table(df$traveltime)
+table(df$traveltime)/len_df
+```
+
+```{r}
+ggplotly(ggplot(aes(Risk, as.numeric(traveltime)), data = df) +
+  geom_violin(alpha = 0.3, color = I("Red"), fill = I("Red")) +
+  geom_boxplot(alpha = 0.5, color = I("black")) +
+  geom_point(position = position_jitter(width = 0.5, height = 0.1), 
+             color = I("blue"),
+             alpha = 0.4) +
+  ylab("Travel Time (minutes)") +
+  ggtitle("Travel Time to School vs Risk"))
+
+by(as.numeric(df$traveltime), df$Risk, summary)
+
+print("Correlation between travel time and risk")
+cor(as.numeric(df$traveltime), as.numeric(df$Risk))
+```
+
+```{r}
+df$traveltimeSimple <- 0
+df$traveltimeSimple[as.numeric(df$traveltime) > 2] <- 1
+```
+
+
+We can see from the mean values, that as travel time increaseses, students are more likely to abuse alcohol. However, the relationship is not overly strong as seen by the median, 3rd quartile values, and correlation.
+
+```{r}
+df$studytime <- factor(df$studytime, levels = c("1","2","3","4"), 
+                    labels = c("Less than 2 Hours", "2 to 5 Hours","5 to 10 Hours",
+                               "More than 10 Hours"))
+```
+
+
+```{r}
+p1 <- plot_ly(df, x=~studytime, color = ~Risk, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = list(title = "Time Spent Studying (Weekly)"))
+
+a <- data.frame(prop.table(table(df$Risk, df$studytime),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1))) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Time Spent Studying vs Risk",
+         yaxis = ns,
+         margin = list(pad = 5,
+                       t = 80,
+                       b = 120))
+
+print("Number of students for each study time group:")
+table(df$studytime)
+table(df$studytime)/len_df
+```
+
+```{r}
+ggplotly(ggplot(aes(Risk, as.numeric(studytime)), data = df) +
+  geom_violin(alpha = 0.3, color = I("Red"), fill = I("Red")) +
+  geom_boxplot(alpha = 0.5, color = I("black")) +
+  geom_point(position = position_jitter(width = 0.5, height = 0.1), 
+             color = I("blue"),
+             alpha = 0.4) +
+  ylab("Time Spent Studying (Groupings)") +
+  ggtitle("Time Spent Studying vs Risk")) %>%
+  layout(margin = list(pad = 0,
+                       l = 60))
+
+by(as.numeric(df$studytime), df$Risk, summary)
+print("Correlation between time spent studying and risk:")
+cor(as.numeric(df$studytime), as.numeric(df$Risk))
+```
+
+```{r}
+df$studytimeSimple <- 0
+df$studytimeSimple[as.numeric(df$studytime) == 1] <- 1
+```
+
+
+There is a reasonable relationship here. If a student spends less time studying, s/he is more likely to abuse alcohol. Note: The values for 'Time Spent Studying' (1,2,3,4) numerically represent 'Less than 2 Hours', '2 to 5 Hours', '5 to 10 Hours', and 'More than 10 Hours'. 
+
+```{r}
+p1 <- plot_ly(df, x=~failures, color = ~Risk, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = list(title = "Number of Failed Classes"))
+
+a <- data.frame(prop.table(table(df$Risk, df$failures),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1))) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Number of Failed Classes vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students for each failure group:")
+table(df$failures)
+table(df$failures)/len_df
+```
+
+```{r}
+ggplotly(ggplot(aes(Risk, as.numeric(studytime)), data = df) +
+  geom_violin(alpha = 0.3, color = I("Red"), fill = I("Red")) +
+  geom_boxplot(alpha = 0.5, color = I("black")) +
+  geom_point(position = position_jitter(width = 0.5, height = 0.1), 
+             color = I("blue"),
+             alpha = 0.4) +
+  ylab("Number of Failed Classes") +
+  ggtitle("Number of Failed Classes vs Risk")) %>%
+  layout(margin = list(t = 80,
+                       b = 80,
+                       l = 60,
+                       pad = 5))
+
+by(as.numeric(df$failures), df$Risk, summary)
+print("Correlation between number of failed classes and risk:")
+cor(as.numeric(df$failures), as.numeric(df$Risk))
+```
+
+As a student fails more classes, it seems that they are more likely to abuse alcohol. To simplify the relationship, let's look at students having failed at least one class versus their risk group.
+
+```{r}
+df$failed <- 1
+df$failed[df$failures == 0] <- 0
+
+df$failed <- factor(df$failed, levels = c("0","1"), labels = c("No", "Yes"))
+```
+
+```{r}
+p1 <- plot_ly(df, x=~Risk, color = ~failed, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = risk)
+
+a <- data.frame(prop.table(table(df$Risk, df$failed),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1)),
+             showlegend = FALSE) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Has Failed a Class vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students for each failed group:")
+table(df$failed)
+table(df$failed)/len_df
+by(as.numeric(df$failed), df$Risk, summary)
+```
+
+This should help to make the relationship look even more clear. If a student has failed at least one class they are slightly more likely to abuse alcohol. 
+
+```{r}
+df$schoolsup <- factor(df$schoolsup, levels = c("no","yes"), labels = c("No", "Yes"))
+```
+
+```{r}
+p1 <- plot_ly(df, x=~Risk, color = ~schoolsup, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = risk)
+
+a <- data.frame(prop.table(table(df$Risk, df$schoolsup),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1)),
+             showlegend = FALSE) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Extra Educational Support vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students for each educational support group:")
+table(df$schoolsup)
+table(df$schoolsup)/len_df
+by(as.numeric(df$schoolsup), df$Risk, summary)
+```
+
+If a student receives extra educational support, they are less likely to abuse alcohol.
+
+```{r}
+df$famsup <- factor(df$famsup, levels = c("no","yes"), labels = c("No", "Yes"))
+```
+
+```{r}
+p1 <- plot_ly(df, x=~Risk, color = ~famsup, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = risk)
+
+a <- data.frame(prop.table(table(df$Risk, df$famsup),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1)),
+             showlegend = FALSE) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Educational Support From Family vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students for each educational support group:")
+table(df$famsup)
+table(df$famsup)/len_df
+by(as.numeric(df$famsup), df$Risk, summary)
+```
+
+Oddly the trend is reversed here. Perhaps students do not like receiving educational support from their family and this can lead them to negatives behaviours...but that's only a guess.
+
+```{r}
+df$paid <- factor(df$paid, levels = c("no","yes"), labels = c("No", "Yes"))
+
+```
+
+
+```{r}
+p1 <- plot_ly(df, x=~Risk, color = ~paid, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = risk)
+
+a <- data.frame(prop.table(table(df$Risk, df$paid),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1)),
+             showlegend = FALSE) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Paid for Extra Classes vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students for each paying group:")
+table(df$paid)
+table(df$paid)/len_df
+```
+
+Paying for extra classes doesn't change a student's drinking habits.
+
+```{r}
+df$activities <- factor(df$activities, levels = c("no","yes"), labels = c("No", "Yes"))
+```
+
+
+```{r}
+p1 <- plot_ly(df, x=~Risk, color = ~activities, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = risk)
+
+a <- data.frame(prop.table(table(df$Risk, df$activities),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1)),
+             showlegend = FALSE) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Participating in Extra-Curricular Activities vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students for each activity group:")
+table(df$activities)
+table(df$activities)/len_df
+```
+
+Students in the high risk group are more likely to participate in extra-cirricular acitivities.
+
+```{r}
+p1 <- plot_ly(df, x=~Risk, color = ~nursery, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = risk)
+
+a <- data.frame(prop.table(table(df$Risk, df$nursery),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1)),
+             showlegend = FALSE) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Attended Nursery School vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students for each nursery group:")
+table(df$nursery)
+table(df$nursery)/len_df
+```
+
+Attending nursery school as a young child looks to decrease the likelihood of drinking excessive when older.
+
+```{r}
+df$higher <- factor(df$higher, levels = c("no","yes"), labels = c("No", "Yes"))
+```
+
+
+```{r}
+p1 <- plot_ly(df, x=~Risk, color = ~higher, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = risk)
+
+a <- data.frame(prop.table(table(df$Risk, df$higher),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1)),
+             showlegend = FALSE) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Planning to Attend Higher Education vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students for each education group:")
+table(df$higher)
+table(df$higher)/len_df
+```
+
+Students that are less inclinded to attend higher education are more likely to drink excessive amounts of alcohol.
+
+```{r}
+df$internet <- factor(df$internet, levels = c("no","yes"), labels = c("No", "Yes"))
+```
+
+```{r}
+p1 <- plot_ly(df, x=~Risk, color = ~internet, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = risk)
+
+a <- data.frame(prop.table(table(df$Risk, df$internet),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1)),
+             showlegend = FALSE) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Internet Access at Home vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students for each internet group:")
+table(df$internet)
+table(df$internet)/len_df
+```
+
+There doesn't seem to be a relationship between alcohol consumption and internet access at home.
+
+```{r}
+df$romantic <- factor(df$romantic, levels = c("no","yes"), labels = c("No", "Yes"))
+```
+
+
+```{r}
+p1 <- plot_ly(df, x=~Risk, color = ~romantic, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = risk)
+
+a <- data.frame(prop.table(table(df$Risk, df$romantic),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1)),
+             showlegend = FALSE) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "In a Romantic Relationship vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students for each relationship group:")
+table(df$romantic)
+table(df$romantic)/len_df
+```
+
+No strong relationship between having a significant other and alcohol consumption.
+
+```{r}
+df$famrel <- factor(df$famrel, levels = c("1","2","3","4","5"),
+                    labels = c("Very Bad","Bad","Average","Good","Excellent"))
+```
+
+
+```{r}
+p1 <- plot_ly(df, x=~famrel, color = ~Risk, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = list(title = "Quality of Family Relationships"))
+
+a <- data.frame(prop.table(table(df$Risk, df$famrel),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1))) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Quality of Family Relationships vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students for each quality group:")
+table(df$famrel)
+table(df$famrel)/len_df
+by(as.numeric(df$famrel), df$Risk, summary)
+```
+
+```{r}
+df$famrelSimple <- 0
+df$famrelSimple[as.numeric(df$famrel) > 2] <- 1
+```
+
+
+Students in the high risk group, typically, have slightly worse family relationships.
+
+```{r}
+df$freetime <- factor(df$freetime, levels = c("1","2","3","4","5"),
+                      labels = c("Very Low","Low","Average","High","Very High"))
+```
+
+
+```{r}
+p1 <- plot_ly(df, x=~freetime, color = ~Risk, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = list(title = "Amount of Free Time After School"))
+
+a <- data.frame(prop.table(table(df$Risk, df$freetime),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1))) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Amount of Free Time After School vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students for each time group:")
+table(df$freetime)
+table(df$freetime)/len_df
+by(as.numeric(df$freetime), df$Risk, summary)
+print("Correlation between Amount of free time after school and risk:")
+cor(as.numeric(df$freetime), as.numeric(df$Risk))
+```
+
+```{r}
+df$freetimeSimple <- 0
+df$freetimeSimple[as.numeric(df$freetime) >= 4] <- 1
+```
+
+
+There is a weak, but positive relationship between amount of free time after school and alcohol consumption. One of the main features of these plots is students in the high risk group are much more likely to have a 'very high' amount of free time.
+
+```{r}
+df$goout <- factor(df$goout, levels = c("1","2","3","4","5"),
+                   labels = c("Very Low","Low","Average","High","Very High"))
+```
+
+
+```{r}
+p1 <- plot_ly(df, x=~goout, color = ~Risk, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = list(title = "Frequency of Going Out with Friends"))
+
+a <- data.frame(prop.table(table(df$Risk, df$goout),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1))) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Frequency of Going Out with Friends vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students for each social group:")
+table(df$goout)
+table(df$goout)/len_df
+```
+
+
+```{r}
+ggplotly(ggplot(aes(Risk, as.numeric(goout)), data = df) +
+  geom_violin(alpha = 0.3, color = I("Red"), fill = I("Red")) +
+  geom_boxplot(alpha = 0.8, color = I("black")) +
+  geom_point(position = position_jitter(width = 0.5, height = 0.1), 
+             color = I("blue"),
+             alpha = 0.4) +
+  ylab("Frequency of Going Out with Friends") +
+  ggtitle("Frequency of Going Out with Friends vs Risk")) %>%
+  layout(margin = list(t = 80,
+                       b = 80,
+                       pad = 5,
+                       l = 60))
+
+by(as.numeric(df$goout), df$Risk, summary)
+print("Correlation between frequency of going out with friends and risk")
+cor(as.numeric(df$goout), as.numeric(df$Risk))
+```
+
+```{r}
+df$gooutSimple <- 0
+df$gooutSimple[as.numeric(df$goout) == 3] <- 1
+df$gooutSimple[as.numeric(df$goout) >= 4] <- 2
+```
+
+This could be the most differentiating feature that we have seen yet. We can clearly see that students who go out with their friends more often are more likely to be in a high risk group.
+
+```{r}
+df$health <- factor(df$health, levels = c("1","2","3","4","5"),
+                    labels = c("Very Bad","Bad","Mediocre","Good","Very Good"))
+```
+
+
+```{r}
+p1 <- plot_ly(df, x=~health, color = ~Risk, type = "histogram",
+              marker = list(line = list(color = "white", width = 1))) %>%
+    layout(barmode = "stack",
+           xaxis = risk)
+
+a <- data.frame(prop.table(table(df$Risk, df$health),1))
+
+p2 <-plot_ly(a, x=a$Var1, y =~Freq, color = a$Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1))) %>%
+  layout(barmode = "stack",
+         xaxis = list(title = "Quality of Health"))
+
+subplot(p1,p2, margin = 0.04, titleX = TRUE) %>%
+  layout(title = "Health vs Risk",
+         yaxis = ns,
+         margin = m)
+
+print("Number of students for each health group:")
+table(df$health)
+table(df$health)/len_df
+```
+
+```{r}
+ggplotly(ggplot(aes(Risk, as.numeric(health)), data = df) +
+  geom_violin(alpha = 0.3, color = I("Red"), fill = I("Red")) +
+  geom_boxplot(alpha = 0.8, color = I("black")) +
+  geom_point(position = position_jitter(width = 0.5, height = 0.1), 
+             color = I("blue"),
+             alpha = 0.4) +
+  ylab("Quality of Health") +
+  ggtitle("Health vs Risk")) %>%
+  layout(margin = list(t = 80,
+                       b = 80,
+                       pad = 5,
+                       l = 60))
+
+by(as.numeric(df$health), df$Risk, summary)
+print("Correlation between health and risk:")
+cor(as.numeric(df$health), as.numeric(df$Risk))
+```
+
+```{r}
+df$healthSimple <- 0
+df$healthSimple[as.numeric(df$health) == 5] <- 1
+```
+
+
+We could be seeing the bias of a personal survey here. Despite having a very unhealthy habit, those in the high risk group consider themselves to be the healthiest.
+
+
+```{r}
+ggplotly(ggplot(aes(absences, color = Risk, fill = Risk), data = df) +
+  geom_density(alpha = 0.4)) %>%
+  layout(margin = list(l = 60,
+                       pad = 0,
+                       t = 80,
+                       b = 80),
+         yaxis = list(title = "Percent of Students within each Risk Group"),
+         xaxis = list(title = "Number of Absences"),
+         title = "Absences vs Risk")
+
+by(df$absences, df$Risk, summary)
+print("Correlation between number of absences and risk:")
+cor(df$absences, as.numeric(df$Risk))
+```
+
+```{r}
+df$absencesRank <- 0
+df$absencesRank[percent_rank(df$absences) >= 0.5] <- 1
+df$absencesRank[percent_rank(df$absences) >= 0.75] <- 2
+```
+
+Students in higher risk groups seem to miss more classes than those in the low risk group.
+
+```{r}
+p1 <- ggplotly(ggplot(aes(G1, color = Risk, fill = Risk), data = df) +
+  geom_density(alpha = 0.4) +
+    ylab(""))
+p2 <- ggplotly(ggplot(aes(G2, color = Risk, fill = Risk), data = df) +
+  geom_density(alpha = 0.4) +
+    theme(legend.title = element_blank()) +
+    ylab("Percent of Students in each Risk Group")) 
+p3 <- ggplotly(ggplot(aes(G3, color = Risk, fill = Risk), data = df) +
+  geom_density(alpha = 0.4) +
+    theme(legend.title = element_blank()) +
+    ylab(""))
+subplot(p1,p2,p3, shareX = TRUE, nrows = 3, titleY = TRUE) %>%
+  layout(title = "Grades in each Period vs Risk",
+         xaxis = list(title = "Top - Period 1, Middle - Period 2, Bottom, Period 3"),
+         margin = list(l = 60,
+                       pad = 0,
+                       t = 80,
+                       b = 80))
+print("Period 1")
+by(df$G1, df$Risk, summary)
+print("Period 2")
+by(df$G2, df$Risk, summary)
+print("Period 3")
+by(df$G3, df$Risk, summary)
+```
+
+Students in the high risk group have the worst grades on average.
+
+```{r}
+df$G2G1 <- df$G2 - df$G1
+df$G3G2 <- df$G3 - df$G2
+df$G3G1 <- df$G3 - df$G1
+```
+
+```{r}
+p1 <- ggplotly(ggplot(aes(G2G1, color = Risk, fill = Risk), data = df) +
+  geom_density(alpha = 0.4) +
+    ylab(""))
+p2 <- ggplotly(ggplot(aes(G3G2, color = Risk, fill = Risk), data = df) +
+  geom_density(alpha = 0.4) +
+    theme(legend.title = element_blank()) +
+    ylab("Percent of Students in each Risk Group")) 
+p3 <- ggplotly(ggplot(aes(G3G2, color = Risk, fill = Risk), data = df) +
+  geom_density(alpha = 0.4) +
+    theme(legend.title = element_blank()) +
+    ylab(""))
+subplot(p1,p2,p3, shareX = TRUE, nrows = 3, titleY = TRUE) %>%
+  layout(title = "Grades Improvement vs Risk",
+         xaxis = list(title = "Top - Periods 2-1</br>Middle - Periods 3-2</br>Bottom, Period 3-1"),
+         margin = list(l = 60,
+                       pad = 0,
+                       t = 80,
+                       b = 80))
+
+print("Period 2 grades minus period 1 grades")
+by(df$G2G1, df$Risk, summary)
+print("Correlation with risk:")
+cor(df$G2G1, as.numeric(df$Risk))
+print("Period 3 grades minus period 2 grades")
+by(df$G3G2, df$Risk, summary)
+print("Correlation with risk:")
+cor(df$G3G2, as.numeric(df$Risk))
+print("Period 3 grades minus period 1 grades")
+by(df$G3G1, df$Risk, summary)
+print("Correlation with risk:")
+cor(df$G3G1, as.numeric(df$Risk))
+```
+
+
+
+```{r}
+df$G1median <- df$G1 > median(df$G1)
+df$G2median <- df$G2 > median(df$G2)
+df$G3median <- df$G3 > median(df$G3)
+
+df$G1median <- as.factor(as.numeric(factor(df$G1median, levels = c(TRUE,FALSE), labels = c(1, 0))) -1)
+df$G2median <- as.factor(as.numeric(factor(df$G2median, levels = c(TRUE,FALSE), labels = c(1, 0))) -1)
+df$G3median <- as.factor(as.numeric(factor(df$G3median, levels = c(TRUE,FALSE), labels = c(1, 0))) -1)
+```
+
+
+```{r}
+a1 <- data.frame(prop.table(table(df$Risk, df$G1median),1))
+
+p1 <-plot_ly(a1, x=~Var1, y =~Freq, color = ~Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1)),
+             showlegend = FALSE) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+a2 <- data.frame(prop.table(table(df$Risk, df$G2median),1))
+
+p2 <-plot_ly(a2, x=~Var1, y =~Freq, color = ~Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1)),
+             showlegend = FALSE) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+a3 <- data.frame(prop.table(table(df$Risk, df$G3median),1))
+
+p3 <-plot_ly(a3, x=~Var1, y =~Freq, color = ~Var2, type = "bar",
+             marker = list(line = list(color = "white", width = 1))) %>%
+  layout(barmode = "stack",
+         xaxis = risk)
+
+subplot(p1,p2,p3, margin = 0.04, titleX = TRUE, shareY = TRUE) %>%
+  layout(title = "Above Median Grades vs Risk",
+         yaxis = list(title = "Percent of Students"),
+         margin = m)
+```
+
+```{r}
+df$Gaverage <- (df$G1 + df$G2 + df$G3) /3
+df$Gmedian <- 0
+df$Gmedian[df$Gaverage > median(df$Gaverage)] <- 1
+```
+
+```{r}
+df$simple <- as.numeric(df$sex) - 1 + df$gooutSimple + df$studytimeSimple + df$freetimeSimple + df$traveltimeSimple
+```
+
+#Multivariate Analysis
+
+Note: There are a number of combinations of features that I compared, but I will only present the plots that show a stronger relationship.
+
+```{r}
+ggplot(aes(as.numeric(goout), as.numeric(studytime), color = Risk), data = df) +
+  geom_jitter() +
+  geom_smooth(se = FALSE, method = 'lm') +
+  ggtitle("Going Out vs Studying Time vs Risk") +
+  xlab("Frequency of Going Out with Friends") +
+  ylab("Time Spent Studying")
+```
+
+```{r}
+df$gooutStudy <- 0
+df$gooutStudy[as.numeric(df$goout) <= 2 & as.numeric(df$studytime) >= 3] <- 1
+df$gooutStudy[as.numeric(df$goout) == 5 & as.numeric(df$studytime) == 1] <- 2
+```
+
+There look to be two clusters in this plot. In the top left, for students who stay home and study more (low risk), and bottom right for students who go out more and study less (higher risk).
+
+```{r}
+ggplot(aes(as.numeric(goout), as.numeric(sex), color = Risk), data = df) +
+  geom_jitter() +
+  geom_smooth(se = FALSE, method = 'lm') +
+  ggtitle("Going Out vs Gender vs Risk") +
+  ylab("Gender") +
+  xlab("Frequency of Going Out with Friends")
+```
+
+```{r}
+df$maleOut <- 0
+df$maleOut[df$sex == "Male" & as.numeric(df$goout) == 4] <- 1
+df$maleOut[df$sex == "Male" & as.numeric(df$goout) == 5] <- 2
+```
+
+The main grouping that I see here is in the top right, which represents males who go out more often with their friends (higher risk).
+
+```{r}
+ggplot(aes(as.numeric(sex), as.numeric(Gmedian), color = Risk), data = df) +
+  geom_jitter() +
+  geom_smooth(se = FALSE, method = 'lm') +
+  ggtitle("Gender vs Having Above Median Grades vs Risk") +
+  ylab("Having Above Median Grades") +
+  xlab("Gender")
+```
+
+```{r}
+df$maleGmedian <- 0
+df$maleGmedian[df$sex == "male" & df$Gmedian == 0] <- 1
+```
+
+The main cluster of interest is in the bottom right, for male students with below median grades (higher risk).
+
+
+```{r}
+df$combos <- df$gooutStudy + df$maleOut + df$maleGmedian
+```
+
+
+
+# Building and Training the Models
+
+
+```{r}
+set.seed(2)
+#Split the data into training (80%) and testing (20%) sets
+partition <- createDataPartition(df$Risk, p=0.8, list = FALSE)
+train <- df[partition,]
+test <- df[-partition,]
+
+train <- subset(train, select = -c(Total, Weekend, Weekday))
+test <- subset(test, select = -c(Total, Weekend, Weekday))
+```
+
+
+```{r}
+print("Perform recursive feature engineering.")
+library(ranger)
+results <- rfe(subset(train, select = -(Risk)), 
+               train$Risk, 
+               sizes = c(1:15),
+               metric = "Kappa",
+               rfeControl = rfeControl(functions = rfFuncs,
+                                       method = "cv",
+                                       number = 5,
+                                       verbose = TRUE))
+
+print(results)
+#ls(results)
+#results$optVariables
+```
+
+```{r}
+importances <- ranger(Risk ~., 
+                      subset(train, 
+                             select = c(maleOut,simple,combos,sex,gooutSimple,goout,
+                                        gooutStudy,Risk)), 
+                      importance = "impurity")
+print("Features ranked by importance:")
+sort(importances$variable.importance, decreasing = TRUE)
+#ls(importances)
+```
+
+
+```{r}
+#plot(results) 
+  
+```
+
+Train the random forest model.
+
+```{r}
+set.seed(1)
+rangerModel <- train(Risk ~ .,data = subset(train, 
+                                            select = c(maleOut,simple,combos,sex,
+                                                       gooutSimple,goout,gooutStudy,Risk)), 
+                     method = "ranger", 
+                     metric = "Kappa",
+                     trControl = trainControl(number = 15, #15
+                                              verbose = TRUE,
+                                              method = "cv",
+                                              sampling = "up"
+                                              ),
+                     tuneGrid=data.frame(.mtry = c(1))) #0.2537
+```
+
+Train the K-Nearest Neighbours model.
+
+```{r}
+set.seed(1)
+knnModel <- train(Risk ~ ., data = subset(train, 
+                                          select = c(maleOut,simple,combos,sex,
+                                                     gooutSimple,goout,gooutStudy,Risk)),
+             method = "knn",
+             metric = "Kappa",
+             preProcess = c("ica"),
+             trControl = trainControl(number = 5, #5
+                                      verbose = TRUE,
+                                      method = "cv"
+                                      ),
+             tuneGrid=data.frame(k = c(21))) #0.288
+```
+
+Train the Support Vector Machines model.
+
+```{r}
+set.seed(1)
+svmModel <- train(Risk ~ ., data = subset(train, 
+                                             select = c(maleOut,simple,combos,sex,
+                                                     gooutSimple,goout,gooutStudy,Risk)), 
+             method = "svmRadialWeights",
+             metric = "Kappa",
+             preProcess = c("ica"),
+             trControl = trainControl(number = 10, #3
+                                      verbose = TRUE,
+                                      method = "cv"
+                                      ),
+             tuneGrid=data.frame(.sigma = c(5),
+                                 .C = c(5),
+                                 .Weight = c(1))) #0.288
+```
+
+
+Train the extreme gradient boosting model.
+
+```{r}
+set.seed(1)
+xgbModel <- train(Risk ~ ., data = subset(train, 
+                                             select = c(maleOut,simple,combos,sex,
+                                                     gooutSimple,goout,gooutStudy,Risk)),
+             method = "xgbTree",
+             metric = "Kappa",
+             preProcess = c("center"),
+             trControl = trainControl(number = 10,
+                                      verbose = TRUE,
+                                      method = "cv"
+                                      ),
+             tuneGrid=data.frame(.nrounds = c(150),
+                                 .max_depth = c(3),
+                                 .eta = c(0.1),
+                                 .gamma = c(0.1),
+                                 .colsample_bytree = c(1),
+                                 .min_child_weight = c(0.8),
+                                 .subsample = c(1))) #0.284
+```
+
+
+```{r}
+print("Random Forest Model:")
+confusionMatrix(rangerModel)
+```
+
+Not particularly good scores. Although the 'High' group is classified reasonably well, the 'Medium' was predicted poorly.
+
+```{r}
+print("K-Nearest Neighbours Model:")
+confusionMatrix(knnModel)
+```
+
+Although the accuracy is higher, I am more concerned about properly classifying the higher risk students, therefore the knn model did worse than the random forest.
+
+```{r}
+print("Support Vector Machines Model:")
+confusionMatrix(svmModel)
+```
+
+Similar to the knn model, and not as good as the random forest model.
+
+```{r}
+print("Extreme Gradient Boosting Model:")
+confusionMatrix(xgbModel)
+```
+
+Also very like the knn and svm models. It seems like the random forest model is the best one so far.
+
+```{r}
+print("Random Forest Model:")
+predictionsRF <- predict(rangerModel, test)
+confusionMatrix(predictionsRF, test$Risk)
+```
+
+```{r}
+print("K-Nearest Neighbour Model:")
+predictionsKNN <- predict(knnModel, test)
+confusionMatrix(predictionsKNN, test$Risk)
+```
+
+```{r}
+print("Support Vector Machines Model:")
+predictionsSVM <- predict(svmModel, test)
+confusionMatrix(predictionsSVM, test$Risk)
+```
+
+
+```{r}
+print("Extreme Gradient Boosting Model:")
+predictionsXGB <- predict(xgbModel, test)
+confusionMatrix(predictionsXGB, test$Risk)
+```
+
+```{r}
+print("An Ensemble of all the Random Forest and XGB Models:")
+predictionsModels <- ceiling((as.numeric(predictionsRF) + 
+                              as.numeric(predictionsSVM)) / 2)
+predictionsModels[predictionsModels == 1] <- "Low"
+predictionsModels[predictionsModels == 2] <- "Medium"
+predictionsModels[predictionsModels == 3] <- "High"
+confusionMatrix(predictionsModels, test$Risk)
+```
+
+Although the Kappa and Accuracy values are some of the lowest for the ensemble model, it is still my preferred choice. It best predicts high risk students, does a reasonable job with low risk students, but struggles (like all of the models) with medium risk students. 
+
+There is still quite a bit of work that needs to be done to make a more useful. If you have any ideas about how this model can be improved, please post them on the discussion board. Thank you!
+
+
+
+
+
